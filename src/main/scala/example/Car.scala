@@ -1,7 +1,10 @@
 package example
 
+import aggregate.Repository.{LockError, Locked, NotFound}
 import aggregate._
+import example.CarRepository.Id
 
+import scala.collection.mutable
 import scala.util.chaining._
 
 case class Car(motor: Motor, tires: Map[Pos, Tire], navigation: Option[Navigation])
@@ -32,7 +35,8 @@ class CarAgg private(val id: Int, val root: Car) extends SimpleAgg[Car] {
   private def existNavigation(newNavigation: Navigation) = existWithHistory(newNavigation)
   private def emptyNavigation() = emptyWithHistory[Navigation]
 }
-object CarAgg {
+object CarAgg extends AggFactory[Int, Car] {
+  override val make: Int => Car => Agg[Car] = id => root => apply(id, root)
   def apply(id: Int, car: Car): CarAgg = new CarAgg(id, car)
 }
 
@@ -62,3 +66,19 @@ sealed trait CarState
 case object Stopped extends CarState
 case object Running extends CarState
 
+trait CarRepository extends Repository[Id, Int, Car]
+object CarRepository {
+  type Id[T] = T
+}
+
+class InMemoryCarRepository extends CarRepository {
+  private val data = mutable.Map.empty[Int, Car]
+  private val locked = mutable.Set.empty[Int]
+  override def store(id: Int, result: Result[Car]): Int =
+      id.tap(data.update(_, result.agg.root))
+  override def resolve(id: Int): Option[Car] = data.get(id)
+  override def lock(id: Int): Either[LockError, Car] =
+      if (locked(id)) Left(Locked)
+      else resolve(id).fold[Either[LockError, Car]](Left(NotFound))(Right(_).tap(_ => locked.add(id)))
+  def unlock(id: Int): InMemoryCarRepository = this.tap(_ => locked.subtractOne(id))
+}
